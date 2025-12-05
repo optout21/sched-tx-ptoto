@@ -305,7 +305,10 @@ void ScheduledTxPool::ProcessInLoop(uint32_t current_time_override) {
 /// Process a transaction now
 /// @return true if the tx was processed
 bool ScheduledTxPool::ProcessTx(const ScheduledTx& tx, uint32_t current_time) {
-    printf("%d: Broadcasting tx (size %d '%s'), now %d \n", current_time, tx.size(), tx.ToString().c_str(), current_time);
+    printf("Broadcasting tx (size %d '%s'), now %d ... \n", tx.size(), tx.ToString().c_str(), current_time);
+    auto chainman = this->node_context.EnsureChainman();
+    auto res = chainman.ProcessTransaction(std::make_shared<const CTransaction>(tx.tx));
+    printf("Broadcast result: %d, now %d\n", int(res.m_result_type), current_time);
     return true;
 }
 

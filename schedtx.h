@@ -98,6 +98,7 @@ public:
 
 class ScheduledTxPool {
 private:
+    NodeContext node_context;
     ScheduledTxCollection pool;
     std::string file_name;
     std::mutex mtx;
@@ -105,14 +106,7 @@ private:
     bool running;
 
 public:
-    ScheduledTxPool() : running(false) {}
-
-    ScheduledTxPool(const ScheduledTxPool& p2) :
-        pool(p2.pool),
-        file_name(p2.file_name),
-        mtx(std::mutex()),
-        worker(std::thread()),
-        running(false) {}
+    ScheduledTxPool(NodeContext& node_context) : node_context(node_context), running(false) {}
 
     ~ScheduledTxPool() {
         Stop();
@@ -142,7 +136,7 @@ protected:
 
     /// Process a transaction now
     /// @return true if the tx was processed
-    static bool ProcessTx(const ScheduledTx& tx, uint32_t current_time);
+    bool ProcessTx(const ScheduledTx& tx, uint32_t current_time);
 
     // Write the pool to a file
     uint32_t WriteToFile(const std::string& filename);

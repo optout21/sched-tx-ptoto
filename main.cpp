@@ -7,10 +7,9 @@
 #include <sstream>
 
 
-ScheduledTxPool create_sample_pool() {
+void add_sample_txs(ScheduledTxPool& pool) {
     auto n = 20;
-    printf("Creating a pool with %d txs ... ", n);
-    ScheduledTxPool p;
+    printf("Adding %d txs to the pool '%s' ... ", n, pool.ToString().c_str());
     auto now{time(NULL)};
     for (auto i{0}; i < n; ++i) {
         auto rem3 = i % 3;
@@ -18,15 +17,16 @@ ScheduledTxPool create_sample_pool() {
         auto to_wait = (9 + 3*i + 73*rem3*rem3*rem3 + 37*rem7*rem7) / 30;
         std::vector<uint8_t> dummy_tx;
         dummy_tx.resize(30 + i + rem3 * 7 + rem7 * 3);
-        auto _txid = p.Add(now + i + to_wait, dummy_tx);
+        auto _txid = pool.Add(now + i + to_wait, dummy_tx);
     }
-    printf("'%s' \n", p.ToString().c_str());
-    return p;
+    printf("'%s' \n", pool.ToString().c_str());
 }
 
 /*
 void test_earliest_and_remove() {
-    ScheduledTxCollection p = create_sample_pool();
+    ScheduledTxCollection p;
+    add_sample_txs(p);
+
     auto now{time(NULL)};
     auto current_time{now};
     while (p.Count() > 0) {
@@ -125,7 +125,9 @@ void do_tests() {
 
     // test_earliest_and_remove();
 
-    ScheduledTxPool p = create_sample_pool();
+    NodeContext nc;
+    ScheduledTxPool p(nc);
+    add_sample_txs(p);
     p.Start();
     // wait until empty
     while (p.Count() > 0) {
@@ -142,7 +144,8 @@ int main() {
     // do_tests();
 
     auto filename{"schedtx.dat"};
-    ScheduledTxPool pool;
+    NodeContext nc;
+    ScheduledTxPool pool(nc);
     pool.CreateFromFile(filename);
     pool.Start();
     printf("Pool created: '%s' (filename '%s')\n", pool.ToString().c_str(), filename);
