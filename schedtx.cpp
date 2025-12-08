@@ -1,8 +1,19 @@
 #include "schedtx.h"
 
+#ifndef __SCHED_TX_STANDALONE_PROTO__
+#include <node/context.h>
+#include <node/transaction.h>
+#include <primitives/transaction.h>
+#include <crypto/hex_base.h>
+#include <core_io.h>
+#include <rpc/server_util.h>
+#include <validation.h>
+#endif
+
 #include <cassert>
 #include <chrono>
 #include <cstdint>
+#include <cstring>
 #include <ctime>
 #include <fstream>
 #include <iostream>
@@ -30,6 +41,8 @@ void ScheduledTx::Serialize(std::ostream& stream) const {
     // Write fields in order with fixed size
     stream.write(reinterpret_cast<const char*>(&submitted_time), sizeof(submitted_time));
     stream.write(reinterpret_cast<const char*>(&target_time), sizeof(target_time));
+    stream.write(reinterpret_cast<const char*>(&max_fee), sizeof(max_fee));
+    stream.write(reinterpret_cast<const char*>(&broadcast_method), sizeof(broadcast_method));
     stream.write(reinterpret_cast<const char*>(&max_retries), sizeof(max_retries));
     stream.write(reinterpret_cast<const char*>(&retry_period), sizeof(retry_period));
     stream.write(reinterpret_cast<const char*>(&retry_count), sizeof(retry_count));
@@ -39,23 +52,32 @@ void ScheduledTx::Serialize(std::ostream& stream) const {
     uint32_t tx_size = static_cast<uint32_t>(tx.size());
     stream.write(reinterpret_cast<const char*>(&tx_size), sizeof(tx_size));
     if (tx_size > 0) {
-        stream.write(reinterpret_cast<const char*>(tx.data().data()), tx_size);
+        stream.write(reinterpret_cast<const char*>(tx.data()), tx_size);
     }
 }
 
 // Deserialize from a stream and construct an object
 ScheduledTx ScheduledTx::Deserialize(std::istream& stream) {
-    ScheduledTx obj;
+    std::uint32_t submitted_time;
+    std::uint32_t target_time;
+    std::uint64_t max_fee;
+    node::TxBroadcast broadcast_method;
+    std::uint8_t max_retries;
+    std::uint32_t retry_period;
+    std::uint8_t retry_count;
+    std::uint32_t last_try_time;
 
     // TODO stream size check, error handling
 
     // Read fields in order
-    stream.read(reinterpret_cast<char*>(&obj.submitted_time), sizeof(obj.submitted_time));
-    stream.read(reinterpret_cast<char*>(&obj.target_time), sizeof(obj.target_time));
-    stream.read(reinterpret_cast<char*>(&obj.max_retries), sizeof(obj.max_retries));
-    stream.read(reinterpret_cast<char*>(&obj.retry_period), sizeof(obj.retry_period));
-    stream.read(reinterpret_cast<char*>(&obj.retry_count), sizeof(obj.retry_count));
-    stream.read(reinterpret_cast<char*>(&obj.last_try_time), sizeof(obj.last_try_time));
+    stream.read(reinterpret_cast<char*>(&submitted_time), sizeof(submitted_time));
+    stream.read(reinterpret_cast<char*>(&target_time), sizeof(target_time));
+    stream.read(reinterpret_cast<char*>(&max_fee), sizeof(max_fee));
+    stream.read(reinterpret_cast<char*>(&broadcast_method), sizeof(broadcast_method));
+    stream.read(reinterpret_cast<char*>(&max_retries), sizeof(max_retries));
+    stream.read(reinterpret_cast<char*>(&retry_period), sizeof(retry_period));
+    stream.read(reinterpret_cast<char*>(&retry_count), sizeof(retry_count));
+    stream.read(reinterpret_cast<char*>(&last_try_time), sizeof(last_try_time));
 
     // Read tx size first, then the tx data
     uint32_t tx_size;
@@ -64,10 +86,10 @@ ScheduledTx ScheduledTx::Deserialize(std::istream& stream) {
     if (tx_size > 0) {
         txdata.resize(tx_size);
         stream.read(reinterpret_cast<char*>(txdata.data()), tx_size);
-        obj.tx = CTransaction(txdata);
     }
 
-    return obj;
+    ScheduledTx tx(submitted_time, target_time, txdata, max_fee, broadcast_method, max_retries, retry_period, retry_count, last_try_time);
+    return tx;
 }
 
 void ScheduledTxCollection::AddInternal(ScheduledTx& tx) {
@@ -97,7 +119,7 @@ std::optional<std::tuple<uint32_t, size_t>> ScheduledTxCollection::GetEarliest()
     size_t index(0);
     assert(this->tx.size() > index);
     uint32_t time{this->tx[index].target_time};
-    for (auto i{1}; i < this->tx.size(); ++i) {
+    for (size_t i{1}; i < this->tx.size(); ++i) {
         if (this->tx[i].target_time < time) {
             index = i;
             time = this->tx[index].target_time;
@@ -106,8 +128,8 @@ std::optional<std::tuple<uint32_t, size_t>> ScheduledTxCollection::GetEarliest()
     return std::optional<std::tuple<uint32_t, size_t>>({time, index});
 }
 
-std::optional<ScheduledTx> ScheduledTxCollection::GetOneProcessable(int32_t current_time) {
-    for (auto i{0}; i < this->tx.size(); ++i) {
+std::optional<ScheduledTx> ScheduledTxCollection::GetOneProcessable(uint32_t current_time) {
+    for (size_t i{0}; i < this->tx.size(); ++i) {
         // Check by absolute time
         if (this->tx[i].GetTargetTime() <= current_time) {
             auto to_process = this->tx[i];
@@ -137,10 +159,37 @@ uint32_t ScheduledTxCollection::Serialize(std::ostream& stream) const {
     for (size_t i{0}; i < this->tx.size(); ++i) {
         this->tx[i].Serialize(stream);
     }
+    {
+        // Add human-readable text for debug
+        // TODO remove
+        std::string text = this->ToString();
+        stream.write(reinterpret_cast<const char*>(text.c_str()), text.size());
+        auto newline = "\n";
+        stream.write(newline, strlen(newline));
+        for (size_t i{0}; i < this->tx.size(); ++i) {
+            std::string text = this->tx[i].ToString();
+            stream.write(reinterpret_cast<const char*>(text.c_str()), text.size());
+            stream.write(newline, strlen(newline));
+        }
+    }
     return static_cast<uint32_t>(this->tx.size());
 }
 
-// Deerialize the transactions from a stream
+CTransaction ParseTransaction(const std::vector<uint8_t>& data) {
+    #ifndef __SCHED_TX_STANDALONE_PROTO__
+    // A bit of workaround: first make it into hex string
+    std::string hexstr = HexStr(data);
+    CMutableTransaction mtx;
+    assert(DecodeHexTx(mtx, hexstr));
+    // MakeTransactionRef(std::move(mtx));
+    CTransaction ctx(mtx);
+    return ctx;
+    #else
+    return CTransaction(data);
+    #endif
+}
+
+// Deserialize the transactions from a stream
 ScheduledTxCollection ScheduledTxCollection::Deserialize(std::istream& stream) {
     ScheduledTxCollection pool;
 
@@ -148,7 +197,7 @@ ScheduledTxCollection ScheduledTxCollection::Deserialize(std::istream& stream) {
 
     uint32_t count;
     stream.read(reinterpret_cast<char*>(&count), sizeof(count));
-    for (auto i{0}; i < count; ++i) {
+    for (size_t i{0}; i < count; ++i) {
         auto tx1 = ScheduledTx::Deserialize(stream);
         pool.tx.emplace_back(tx1);
     }
@@ -157,6 +206,11 @@ ScheduledTxCollection ScheduledTxCollection::Deserialize(std::istream& stream) {
 }
 
 
+ScheduledTxPool::ScheduledTxPool(std::any& node_context) : node_context(std::move(node_context)), running(false) {
+    assert(this->node_context.has_value());
+    // auto& typed_node_context = EnsureAnyNodeContext(this->node_context);
+}
+
 void ScheduledTxPool::CreateFromFile(const char* filename) {
     this->file_name = std::string(filename);
     auto read = ReadFromFile(this->file_name);
@@ -164,6 +218,7 @@ void ScheduledTxPool::CreateFromFile(const char* filename) {
         std::lock_guard<std::mutex> lock(this->mtx);
         this->pool = read.value();
     }
+    printf("ScheduledTxPool: instance created, '%s' fn '%s'\n", ToString().c_str(), filename);
 }
 
 void ScheduledTxPool::Start() {
@@ -189,17 +244,18 @@ void ScheduledTxPool::Stop() {
     }
 }
 
-Txid ScheduledTxPool::Add(uint32_t target_time, const ByteArray& tx, std::uint8_t max_retries, std::uint32_t retry_period) {
+Txid ScheduledTxPool::ScheduleTx(uint32_t target_time, const std::vector<uint8_t>& tx, uint64_t max_fee, node::TxBroadcast broadcast_method, std::uint8_t max_retries, std::uint32_t retry_period) {
     auto now = time(NULL);
-    CTransaction ctx(tx);
+    // Parse TX, obtain Txid
+    CTransaction ctx = ParseTransaction(tx);
     Txid txid = ctx.GetHash();
-    ScheduledTx stx(now, target_time, tx, max_retries, retry_period);
+    ScheduledTx stx(now, target_time, tx, max_fee, broadcast_method, max_retries, retry_period);
     {
         std::lock_guard<std::mutex> lock(this->mtx);
         // may throw
         this->pool.AddInternal(stx);
     }
-    this-SaveIfNeeded();
+    this->SaveIfNeeded();
     return txid;
 }
 
@@ -246,7 +302,7 @@ void ScheduledTxPool::ProcessInLoop(uint32_t current_time_override) {
         time_delta = current_time_override - current_time;
     }
 
-    printf("ScheduledTxCollection starting, count=%ld\n", this->Count());
+    printf("ScheduledTxPool starting, count=%ld\n", this->Count());
     {
         std::lock_guard<std::mutex> lock(this->mtx);
         auto earliest = this->pool.GetEarliest();
@@ -306,9 +362,14 @@ void ScheduledTxPool::ProcessInLoop(uint32_t current_time_override) {
 /// @return true if the tx was processed
 bool ScheduledTxPool::ProcessTx(const ScheduledTx& tx, uint32_t current_time) {
     printf("Broadcasting tx (size %d '%s'), now %d ... \n", tx.size(), tx.ToString().c_str(), current_time);
-    auto chainman = this->node_context.EnsureChainman();
-    auto res = chainman.ProcessTransaction(std::make_shared<const CTransaction>(tx.tx));
-    printf("Broadcast result: %d, now %d\n", int(res.m_result_type), current_time);
+    assert(this->node_context.has_value());
+    auto& typed_node_context = EnsureAnyNodeContext(this->node_context);
+    CTransaction ctx = ParseTransaction(tx.tx);
+    std::string broadcast_error;
+    // TODO Check if wait_callback=true needed?
+    auto res = BroadcastTransaction(typed_node_context, std::make_shared<const CTransaction>(ctx), broadcast_error, static_cast<CAmount>(tx.max_fee), tx.broadcast_method, /*wat_callback=*/true);
+    // printf("Broadcast result: %d, now %d, txid %s\n", int(res), current_time, ctx.GetHash().ToString().c_str());
+    printf("Broadcast result: %d, now %d\n", int(res), current_time);
     return true;
 }
 
@@ -322,6 +383,9 @@ uint32_t ScheduledTxPool::WriteToFile(const std::string& filename) {
     std::lock_guard<std::mutex> lock(this->mtx);
     auto res = this->pool.Serialize(file);
     file.close();
+
+    printf("ScheduledTxPool: Written to file, count %d, file '%s'\n", res, filename.c_str());
+
     return res;
 }
 
@@ -342,15 +406,10 @@ std::optional<ScheduledTxCollection> ScheduledTxPool::ReadFromFile(const std::st
     }
 }
 
-uint32_t ScheduledTxPool::SaveIfNeeded() {
+void ScheduledTxPool::SaveIfNeeded() {
     if (this->file_name.length() > 0) {
         auto count = this->WriteToFile(this->file_name);
-        if (count >= 0) {
-            printf("Written to file, count %d, file '%s'\n", count, this->file_name.c_str());
-        }
-        return count;
-    } else {
-        return false;
+        // printf("ScheduledTxPool: Written to file, count %d, file '%s'\n", count, this->file_name.c_str());
     }
 }
 

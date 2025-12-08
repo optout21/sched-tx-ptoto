@@ -4,6 +4,7 @@
 
 #pragma once
 
+#include <any>
 #include <cstdint>
 #include <memory>
 #include <vector>
@@ -53,24 +54,58 @@ struct MempoolAcceptResult {
     // ...
 };
 
-class ChainstateManager {
-public:
-    ChainstateManager() {}
+// class ChainstateManager {
+// public:
+//     ChainstateManager() {}
 
-    MempoolAcceptResult ProcessTransaction(const CTransactionRef& tx, bool test_accept=false) {
-        // Placeholder implementation
-        return MempoolAcceptResult(MempoolAcceptResult::ResultType::VALID);
-    }
-};
+//     MempoolAcceptResult ProcessTransaction(const CTransactionRef& tx, bool test_accept=false) {
+//         // Placeholder implementation
+//         return MempoolAcceptResult(MempoolAcceptResult::ResultType::VALID);
+//     }
+// };
 
-class NodeContext {
-    ChainstateManager chainman;
-public:
-    NodeContext() : chainman(ChainstateManager()) {}
+namespace node {
+    class NodeContext {
+    public:
+        // ChainstateManager chainman;
+        NodeContext() {}
+        // NodeContext() : chainman(ChainstateManager()) {}
 
-    ChainstateManager& EnsureChainman()
-    {
-        return chainman;
-    }
-};
+        // ChainstateManager& EnsureChainman(const node::NodeContext& context)
+        // {
+        //     return chainman;
+        // }
+    };
+}
 
+node::NodeContext& EnsureAnyNodeContext(const std::any& context);
+
+// ChainstateManager& EnsureChainman(node::NodeContext& context);
+
+std::string HexStr(const std::vector<uint8_t>& s);
+
+typedef uint64_t CAmount;
+
+namespace node {
+    /**
+    * How to broadcast a local transaction.
+    * Used to influence `BroadcastTransaction()` and its callers.
+    */
+    enum class TxBroadcast : uint8_t {
+        /// Add the transaction to the mempool and broadcast to all peers for which tx relay is enabled.
+        MEMPOOL_AND_BROADCAST_TO_ALL,
+        /// Add the transaction to the mempool, but don't broadcast to anybody.
+        MEMPOOL_NO_BROADCAST,
+    };
+
+    enum TransactionError : uint8_t {
+        TXERR_OK
+    };
+
+    TransactionError BroadcastTransaction(NodeContext& node,
+                                            CTransactionRef tx,
+                                            std::string& err_string,
+                                            const CAmount& max_tx_fee,
+                                            TxBroadcast broadcast_method,
+                                            bool wait_callback);
+}
